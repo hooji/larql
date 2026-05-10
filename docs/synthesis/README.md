@@ -14,6 +14,8 @@ with the originals (`docs/format.md`, `docs/training-free-insert.md`,
 
 ## Documents
 
+### Foundation set
+
 | # | Document | What you'll learn |
 |---|----------|-------------------|
 | 1 | [01-explainer.md](01-explainer.md) | High-level explainer: how the technique works, the capabilities it provides |
@@ -21,6 +23,13 @@ with the originals (`docs/format.md`, `docs/training-free-insert.md`,
 | 3 | [03-software-architecture.md](03-software-architecture.md) | Architecture of the current Rust implementation: crate map, key data structures, extension points, what exists vs. what's planned |
 | 4 | [04-executive-summary.md](04-executive-summary.md) | One-to-two-page executive summary: what it is, why it matters, ecosystem implications, honest limitations |
 | 5 | [05-questions.md](05-questions.md) | Direct answers to three questions: is the graph view "the real" computation? can it be boiled down? would a Java toy on GPT-2 / nanochat work? |
+
+### Applied — MLX `lm_head` acceleration
+
+| # | Document | What you'll learn |
+|---|----------|-------------------|
+| 6 | [06-mlx-plan-review.md](06-mlx-plan-review.md) | Critical review of an external plan to add a random-projection `lm_head` accelerator to mlx-lm for the Qwen 3.5 family. Identifies engineering, algorithm, and validation issues. |
+| 7 | [07-mlx-plan-revised.md](07-mlx-plan-revised.md) | Revised version of the same sprint plan that fixes the issues identified in 06. PCA-primary instead of random-projection; first-class tied-embedding support; explicit MTP-interaction phase; tightened benchmark methodology. |
 
 ## Reading order
 
