@@ -271,20 +271,7 @@ codify it.
 
 ## Process and methodology concerns
 
-### A. The plan's section references are wrong
-
-The plan references `docs/01-high-level-explainer.md`,
-`docs/02-mathematical-foundations.md`, etc. These don't exist at
-those paths in the LARQL repo — the synthesis docs are at
-`docs/synthesis/01-explainer.md`,
-`docs/synthesis/02-mathematical-foundation.md`, etc.
-
-Either the agent picking up the plan needs paths corrected, or
-this is a signal that the plan was drafted without first verifying
-the cited material exists. Either way: fix the paths before the
-plan is handed off.
-
-### B. "Don't redesign without authorization" is reasonable but...
+### A. "Don't redesign without authorization" is reasonable but...
 
 The plan in §8.8 says:
 > *"The user has approved the random-projection approach specifically.
@@ -300,7 +287,7 @@ PCA as an alternative, or explicitly forbid it.
 I'd recommend: **explicitly authorise PCA**, since it's strictly
 better-conditioned for this problem.
 
-### C. MLX-LM upstream coordination is undersold
+### B. MLX-LM upstream coordination is undersold
 
 §9 says "open a discussion issue *before* the PR if the change
 touches more than the model file + a new utility." This change does
@@ -310,7 +297,7 @@ or generate path. **A discussion issue is not optional**; it's the
 right way to introduce a feature of this size to the upstream
 project.
 
-### D. The dev environment lacks a quality regression gate
+### C. The dev environment lacks a quality regression gate
 
 The plan validates against MMLU/HellaSwag *once* at the end. It
 should validate at multiple settings during development to catch
@@ -318,17 +305,26 @@ regressions early. Even running 100-question subsets at the end of
 each phase is enough to catch "oh, we broke something at d=64"
 before it's compounded with five other changes.
 
-### E. The 397B variant is "stretch" but should be "deferred"
+### D. The 397B variant should be the primary benchmark target, not a stretch
 
-§5.15 lists the 397B variant as an optional stretch. On a Mac
-Studio 192 GB, even a Q4 397B model is 200+ GB and won't fit
-comfortably alongside MLX-LM overhead. Better to:
-- Drop 397B from the initial sprint entirely.
-- Add it as a follow-up after the 122B PR has landed and the
-  technique is proven.
+§5.15 lists Qwen 3.5-397B-A17B as an optional stretch. This is
+backwards for the actual user's situation: the user's M3 Ultra Mac
+Studio has 512 GB unified memory and **397B is one of the models
+they routinely run locally**. It is precisely the workload the
+optimization is meant to accelerate. The 122B-A10B variant should
+be the smaller, faster-iteration *secondary* target — useful for
+pinning down knobs cheaply — but the headline speedup measurement
+should be on 397B-A17B.
 
-This avoids the agent burning hours on hardware-availability issues
-that aren't actually blocking the deliverable.
+There's also a stronger architectural argument: at 397B with top-K
+MoE active params of ~17B, FFN bandwidth is even more dominated by
+expert dispatch than on 122B. The relative share consumed by
+`lm_head` is *higher*, so the optimization's payoff is bigger on
+397B than on 122B. The 5–8% total-decode speedup target is most
+defensible on the 397B variant.
+
+The revised plan promotes 397B to primary and demotes 122B to
+"intermediate validation" rather than deleting it.
 
 ## Section-specific minor comments
 
@@ -344,7 +340,6 @@ that aren't actually blocking the deliverable.
 | §5.9 | "Mix of chat / code / multilingual" — should explicitly include long-context prompts since lm_head latency is per-token regardless of context length. |
 | §5.12 | "First, increase target_dim from 64 → 128" — should also try 32 first (often works fine on embedding matrices and halves Stage 1 cost). |
 | §6 | "Memory overhead ≤ 5% of model RAM" — see issue #6 above; tighten to 0.1% / 50 MB. |
-| §7.1 | All paths to the LARQL synthesis docs are wrong; should be `docs/synthesis/0X-*.md`. |
 | §10.1 | "Port to llama.cpp" is named as #1 follow-up but llama.cpp's BPE/sampling stack is sufficiently different that it's effectively a fresh implementation, not a port. Set expectations accordingly. |
 
 ## Recommendation
@@ -361,9 +356,11 @@ fixable.
 - Promotes PCA to primary algorithm (RP as fallback).
 - Handles tied embeddings from day one.
 - Adds an MTP-interaction phase to Phase 3.
+- Promotes Qwen 3.5-397B-A17B to the primary perf target (matches
+  the user's actual workload on a 512 GB M3 Ultra Mac Studio);
+  keeps 122B as a faster-iterating intermediate target.
 - Tightens benchmark methodology and validation criteria.
 - Resets the speedup target to 5%, with 8% as a stretch.
-- Fixes the doc-reference paths.
 - Tightens the memory budget.
 
 The revised plan is structurally the same — same sprint duration

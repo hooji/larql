@@ -11,15 +11,21 @@
 
 ## 0. For the agent picking this up
 
-Welcome. This is a refined sprint plan replacing
-`06-mlx-plan-original.md`. **Read this entire document first**, then
-the review at `06-mlx-plan-review.md` for the rationale behind the
-changes. Then read these supporting docs in this order:
+Welcome. This is a refined sprint plan replacing the original
+[`docs/06-mlx-lm-head-acceleration-plan.md`](../06-mlx-lm-head-acceleration-plan.md).
+**Read this entire document first**, then the review at
+[`06-mlx-plan-review.md`](06-mlx-plan-review.md) for the rationale
+behind the changes. Then read the supporting docs the original plan
+already cites:
 
-1. [`docs/synthesis/01-explainer.md`](01-explainer.md) — LARQL conceptual frame.
-2. [`docs/synthesis/02-mathematical-foundation.md`](02-mathematical-foundation.md) — sections 2–4 directly apply: matmul-as-graph, gate-KNN as MIPS, sparsity bounds.
-3. [`docs/synthesis/03-software-architecture.md`](03-software-architecture.md) — how LARQL organises the analogous primitive.
+1. [`docs/01-high-level-explainer.md`](../01-high-level-explainer.md) — LARQL conceptual frame.
+2. [`docs/02-mathematical-foundations.md`](../02-mathematical-foundations.md) — sections 2–4 directly apply: matmul-as-graph, gate-KNN as MIPS, sparsity bounds.
+3. [`docs/03-software-architecture.md`](../03-software-architecture.md) — how LARQL organises the analogous primitive.
 4. [`docs/walk-boundary-sweep.md`](../walk-boundary-sweep.md) — empirical proof that "sparse top-K dispatch" preserves output.
+
+The synthesis-flavoured equivalents in [`docs/synthesis/`](.) cover the
+same material with a slightly different angle and may be useful as
+a second pass.
 
 The user has approved this plan. **You are explicitly authorised to use
 either Random Projection or PCA** as the prefilter (see §4.3). Other
@@ -39,15 +45,19 @@ The pre-filter is built at model load time using either truncated
 randomised PCA (default, better recall) or a Gaussian random projection
 (fallback). No sidecar files. No external dependencies.
 
-**Why it matters.** On Qwen 3.5-122B-A10B (vocab=248,320, hidden≈5,120),
-the dense `lm_head` is ~2.5 GB of weight read per token — a memory-bandwidth
-bottleneck on Mac. Sampling needs only the top of the distribution; the
-rest is wasted bandwidth. Replacing the dense gemv with a 64-dim
-prefilter + exact verify on top-2,048 candidates reduces effective
-`lm_head` cost by ~5–10× (after accounting for gather inefficiency and
-kernel-launch overhead, *not* the headline 47× from naive bandwidth math).
-Realistic translation: **~5% total decode speedup** (target), with 8% as
-a stretch goal.
+**Why it matters.** On Qwen 3.5-397B-A17B (vocab=248,320, hidden≈7,168) —
+the user's primary local model on a 512 GB M3 Ultra Mac Studio — the dense
+`lm_head` is ~3.6 GB of weight read per token, a memory-bandwidth
+bottleneck even on Apple's highest-tier unified memory. Sampling needs
+only the top of the distribution; the rest is wasted bandwidth. Replacing
+the dense gemv with a 64-dim prefilter + exact verify on top-2,048
+candidates reduces effective `lm_head` cost by ~5–10× (after accounting
+for gather inefficiency and kernel-launch overhead, *not* the headline
+47× from naive bandwidth math). Realistic translation: **~5% total decode
+speedup** (target), with 8% as a stretch goal — and the share is bigger
+on 397B than on smaller variants because the MoE active-parameter
+fraction is smaller (~17B of 397B = 4.3%), pushing more of the per-token
+bandwidth into the always-dense `lm_head` and embedding paths.
 
 **Why now.** Qwen 3.5's hybrid attention (Gated DeltaNet + GQA, 75/25 mix)
 and ultra-sparse MoE (top-10 of 512 experts) push proportionally more decode
@@ -68,7 +78,11 @@ GLM-4.5/4.6 after.
 **Definition of done.**
 - A PR against `ml-explore/mlx-lm` (preceded by a discussion issue).
 - Unit + integration tests.
-- Benchmarks on Qwen 3.5-9B (dev) and Qwen 3.5-122B-A10B (target).
+- Benchmarks on three variants:
+  - Qwen 3.5-9B (dev) — fast iteration, validates tied-embedding path.
+  - Qwen 3.5-122B-A10B — intermediate validation, useful for tuning knobs.
+  - **Qwen 3.5-397B-A17B (primary perf target)** — the headline number
+    used in the PR description, on a 512 GB M3 Ultra Mac Studio.
 - Recall + quality validation: see §6.
 - PR description references this plan and the LARQL math/architecture docs.
 
@@ -81,12 +95,26 @@ GLM-4.5/4.6 after.
 
 ### 2.1 The lm_head bottleneck
 
-Per-token bandwidth read for `lm_head` on Qwen 3.5-122B-A10B is ~2.5 GB.
+Per-token bandwidth read for `lm_head`:
+
+- Qwen 3.5-122B-A10B (vocab=248,320, hidden≈5,120, f16): ~2.5 GB
+- **Qwen 3.5-397B-A17B (vocab=248,320, hidden≈7,168, f16): ~3.6 GB**
+
 On Mac Studio M3 Ultra (~800 GB/s effective unified-memory bandwidth on
-GPU), that's ~3 ms per token *just for lm_head*. As a fraction of total
-decode time on this MoE model — which only reads ~10 B active params per
-token (~20 GB read) — `lm_head` is **~10–12% of decode bandwidth**. That
-is what's available to be optimised away.
+GPU), that's ~3 ms (122B) and ~4.5 ms (397B) per token *just for lm_head*.
+
+As a fraction of total decode bandwidth, `lm_head` grows with the MoE
+sparsity ratio:
+
+- 122B-A10B: active params ≈ 10B → ~20 GB read; lm_head ≈ **~11%**
+- 397B-A17B: active params ≈ 17B → ~34 GB read; lm_head ≈ **~10%**
+
+Hidden grows with model size too (5,120 → 7,168), so absolute
+`lm_head` cost grows ~1.4×. The relative share is similar between
+variants but the absolute time saved is larger on 397B — the
+optimisation buys ~3.5 ms back per token on 397B vs ~2.5 ms on 122B
+in best-case Stage-1+2 timings, and the user's actual hardware can
+run 397B at decoding speeds where these milliseconds are noticeable.
 
 ### 2.2 What sampling needs
 
@@ -111,25 +139,32 @@ return scatter(exact at cand into [-inf]^V)
 
 ### 2.4 Realistic cost analysis (corrected)
 
-Cost on Qwen 3.5-122B-A10B (V=248,320, H=5,120, d=64, N=2,048):
+Cost on **Qwen 3.5-397B-A17B (primary target, V=248,320, H=7,168,
+d=64, N=2,048):**
 
 | Stage | Ops | Bandwidth (f16) | Realistic Metal time |
 |---|---|---|---|
-| Stage 1 query proj | 0.33 M | <1 MB | <50 µs |
+| Stage 1 query proj | 0.46 M | <1 MB | <50 µs |
 | Stage 1 V × d matmul | 15.9 M | ~32 MB | ~150–250 µs (tall-skinny shape) |
 | Stage 1 top-N partition | — | — | ~100–300 µs |
-| Stage 2 random-row gather | — | ~21 MB random | ~100–200 µs (gather, not contiguous) |
-| Stage 2 N × H matmul | 10.5 M | (above) | ~50–100 µs |
+| Stage 2 random-row gather | — | ~29 MB random | ~150–250 µs (gather, not contiguous) |
+| Stage 2 N × H matmul | 14.7 M | (above) | ~70–130 µs |
 | Stage 2 scatter to [V] | — | ~500 KB write | ~30 µs |
-| **Total** | **~26 M** | **~54 MB nominal** | **~430–930 µs** |
-| Dense baseline | 1.27 B | 2.5 GB contiguous | ~3–6 ms |
+| **Total** | **~31 M** | **~62 MB nominal** | **~500–1,000 µs** |
+| Dense baseline | 1.78 B | 3.6 GB contiguous | ~4.5–7 ms |
 
-The realistic improvement on `lm_head` itself is **5–10× wall-clock**, not
-the 47× suggested by naive bandwidth math. Translating to total decode
-speedup (where `lm_head` is ~10% of bandwidth): **~5% speedup** is the
-target, ~8% is the stretch goal, ~10% is the absolute ceiling assuming
-everything goes well and we recover Stage 2 gather efficiency through
-pinning or kernel-fusion.
+For the 122B-A10B intermediate target (V=248,320, H=5,120), the same
+analysis gives ~430–930 µs vs ~3–6 ms dense. Both variants land in
+the same realistic-improvement regime: **5–10× wall-clock on the
+`lm_head` op itself**, not the headline 47× from naive bandwidth math.
+
+Translating to total decode speedup (where `lm_head` is ~10–11% of
+bandwidth): **~5% speedup** is the target, ~8% is the stretch goal,
+~10% is the absolute ceiling assuming everything goes well and we
+recover Stage 2 gather efficiency through index sorting or
+kernel-fusion. The absolute ms-saved-per-token is larger on 397B
+(~3.5 ms vs ~2.5 ms on 122B), so the user-perceptible benefit is
+bigger on the primary target even at the same percentage speedup.
 
 ### 2.5 Connection to LARQL gate-KNN
 
@@ -143,12 +178,24 @@ integration.
 
 ## 3. Target environment
 
-Qwen 3.5 family (as of May 2026):
+Qwen 3.5 family (as of May 2026), with sprint targets marked:
+
 - Qwen 3.5-9B (dense, vocab=248,320, hidden=4,096, layers=32)
-- Qwen 3.5-27B (dense)
-- Qwen 3.5-35B-A3B (MoE, 35B/3B active)
-- Qwen 3.5-122B-A10B (MoE, 122B/10B active, hidden≈5,120) — primary target
-- Qwen 3.5-397B-A17B (MoE, 397B/17B active) — **deferred** to follow-up
+  — **dev target** (fast iteration; tied-embedding path)
+- Qwen 3.5-27B (dense) — not benchmarked in this sprint
+- Qwen 3.5-35B-A3B (MoE, 35B/3B active) — not benchmarked in this sprint
+- Qwen 3.5-122B-A10B (MoE, 122B/10B active, hidden≈5,120)
+  — **intermediate validation target** (knob tuning, 10× faster
+  iteration than 397B at similar architecture)
+- **Qwen 3.5-397B-A17B (MoE, 397B/17B active, hidden≈7,168)**
+  — **primary perf target.** This is the model the user actually
+  runs locally on their 512 GB M3 Ultra Mac Studio; the headline
+  speedup measurement in the PR is on this variant.
+
+The 397B-A17B variant fits comfortably in 512 GB unified memory at
+Q4_K_M (~250 GB) or BF16 (~800 GB → won't fit, expected). At Q4 it
+leaves ~250+ GB headroom for KV cache, sampler scratch, and
+mlx-lm overhead — no risk of OOM during the sprint.
 
 Hybrid attention (75% Gated DeltaNet + 25% Gated GQA) and ultra-sparse
 MoE (top-10/512 experts) do not affect `lm_head` directly, but make
@@ -162,7 +209,12 @@ Phase 3.
 
 **Tied vs untied embeddings:**
 - Qwen 3.5-9B (dev target): **likely tied** — must be supported in v1.
-- Qwen 3.5-122B-A10B (perf target): likely untied. Confirm at sprint start.
+- Qwen 3.5-122B-A10B: likely untied. Confirm at sprint start.
+- Qwen 3.5-397B-A17B (primary perf target): likely untied. Confirm at sprint start.
+
+If 397B turns out to be tied, the optimisation still applies — the
+tied-embedding wrapping path from §4.2 handles it. Just an extra
+verification step.
 
 **Engine.** `mlx-lm` (`ml-explore/mlx-lm`). Same rationale as original
 plan: Python iteration speed, Mac Silicon native, the team has shipped
@@ -423,12 +475,14 @@ in italics.
    `verify_n=8192` (very generous) and confirm bit-identical greedy
    output to dense across 10 prompts. This is the easy correctness
    check.
-9. **Smoke test on Qwen 3.5-122B-A10B (untied).** Generate output
-   with default settings; confirm output is sensible. *(Don't try to
-   hit the speedup target yet — just verify nothing's broken.)*
+9. **Smoke test on Qwen 3.5-122B-A10B (intermediate target).** Generate
+   output with default settings; confirm output is sensible. *(Don't
+   try to hit the speedup target yet — just verify nothing's broken.)*
 10. **Profile build-time projection cost.** PCA randomised SVD on
-    122B should be 10–30 s. If it's >60 s, surface and ask whether to
-    fall back to RP for the 122B variant.
+    122B should be 10–30 s. Project the 397B build cost from the
+    122B measurement (scales roughly linearly with V × H — same V,
+    1.4× H — so expect ~14–45 s on 397B). If 397B build is >90 s,
+    surface and ask whether to fall back to RP on the primary target.
 11. *(NEW)* **Verify lazy-evaluation correctness.** After
     `enable_approx_lm_head`, run `mx.metal.start_capture()` (if
     available) on a single forward pass; confirm Stage 1 and Stage 2
@@ -451,16 +505,18 @@ in italics.
 14. **Greedy parity.** 50 prompts × 200 tokens; ≥ 99% positions
     identical. (Demoted from "definition of done" to "sanity check"
     per review.)
-15. *(NEW)* **MTP interaction test.** With Qwen 3.5-122B's MTP head
-    enabled, run 50 prompts × 100 tokens. Compare:
+15. *(NEW)* **MTP interaction test.** With MTP enabled, run 50 prompts
+    × 100 tokens on **both** the 122B intermediate target and the
+    397B primary target. Compare:
     - Final token sequence at temp=0 (dense vs approx with MTP both on).
     - Speculative accept rate.
     - Tokens/second.
-    
+
     **Pass:** accept rate within ±5% of dense, output identity ≥ 95%
     at temp=0, tok/s improvement positive (not negative — i.e. MTP
     interaction didn't *worsen* speed by reducing accept rate more
-    than the lm_head saving).
+    than the lm_head saving). Run on 122B first to debug any
+    interaction issues cheaply, then validate on 397B.
 
 16. **Tune knobs if any target missed.**
     - First, swap method=pca for rp (or vice versa) to see which is
@@ -474,17 +530,27 @@ in italics.
 
 17. **Final benchmark on Qwen 3.5-9B (tied dev target).**
     Median of 20 trials, 200-token greedy, with the methodology
-    discipline from §5.4. Report tok/s before/after, IQR, and
-    decode-only-fraction speedup.
-18. **Final benchmark on Qwen 3.5-122B-A10B (untied perf target).**
-    Same methodology. **Target: ≥ 5% total decode speedup;
-    8% is stretch, 10% is ceiling.**
-19. **Memory benchmark.** RSS before vs after `enable_approx_lm_head`
-    on both variants. Should be ~33 MB increase. **Pass: < 50 MB
-    overhead (or 0.1% of model RAM, whichever is larger).**
-20. *(REMOVED)* Original plan's "stretch: validate on 397B" — defer
-    to a follow-up after the 122B PR lands. Don't burn sprint hours
-    on hardware-availability issues for a stretch goal.
+    discipline from §8.10. Report tok/s before/after, IQR, and
+    decode-only-fraction speedup. This catches obvious regressions
+    on the tied-embedding path before scaling up.
+18. **Intermediate benchmark on Qwen 3.5-122B-A10B.** Same
+    methodology. Useful for confirming the technique works at MoE
+    scale before running the longer 397B benchmarks. **Target:
+    ≥ 5% total decode speedup.** If 122B fails to reach 5%, surface
+    and reassess before burning hardware time on 397B.
+19. **Headline benchmark on Qwen 3.5-397B-A17B (primary perf target).**
+    Same methodology, on the user's M3 Ultra Mac Studio. This is the
+    speedup number that goes in the PR description.
+    **Target: ≥ 5% total decode speedup; 8% is stretch, 10% is
+    ceiling.** Also report:
+    - Absolute ms-saved-per-token (not just %).
+    - Tok/s with and without MTP (to confirm MTP interaction didn't
+      regress).
+    - Time-to-first-token before/after (should be unchanged or
+      slightly better).
+20. **Memory benchmark.** RSS before vs after `enable_approx_lm_head`
+    on all three variants. Should be ~33 MB (122B) / ~50 MB (397B)
+    increase. **Pass: ≤ 50 MB absolute, ≤ 0.1% of model RAM.**
 
 ### Phase 5: PR (Days 10–14)
 
@@ -533,12 +599,14 @@ in italics.
 | MMLU accuracy drift | ≤ 0.5% absolute | 1,000-q subset |
 | HellaSwag accuracy drift | ≤ 0.5% absolute | 500-q subset |
 | Greedy parity rate | ≥ 99% | 50 prompts × 200 tokens |
-| **MTP accept-rate drift** | **±5% of dense** | **50 prompts × 100 tokens** |
-| Total decode speedup (122B-A10B) | **≥ 5%** (target), 8% (stretch) | 20-trial median, 200-tok greedy |
+| **MTP accept-rate drift** | **±5% of dense** | **50 prompts × 100 tokens, both 122B and 397B** |
+| **Total decode speedup (Qwen 3.5-397B-A17B, primary target)** | **≥ 5%** (target), 8% (stretch) | 20-trial median, 200-tok greedy on M3 Ultra |
+| Total decode speedup (122B-A10B, intermediate) | ≥ 5% | 20-trial median |
+| Load-time projection cost (397B) | ≤ 90 s (PCA) | Wall clock |
 | Load-time projection cost (122B) | ≤ 60 s (PCA) | Wall clock |
 | **Memory overhead (absolute)** | **≤ 50 MB** | **RSS before/after** |
 | Tied-embedding integration | Works on Qwen 3.5-9B | Smoke test + recall sweep |
-| Untied-embedding integration | Works on Qwen 3.5-122B-A10B | Same |
+| Untied-embedding integration | Works on Qwen 3.5-122B-A10B and Qwen 3.5-397B-A17B | Same |
 | Tests pass | 100% | CI |
 
 If any criterion is not met after tuning, document the gap honestly in
@@ -548,21 +616,30 @@ the PR. Bold rows are *new or tightened* relative to the original plan.
 
 ## 7. Reference materials
 
-### 7.1 Internal docs (LARQL repository, corrected paths)
+### 7.1 Internal docs (LARQL repository)
 
-- [`docs/synthesis/01-explainer.md`](01-explainer.md) — LARQL conceptual overview.
-- [`docs/synthesis/02-mathematical-foundation.md`](02-mathematical-foundation.md)
-  — sections 2–4 ground the math. The walk-FFN derivation in §2 is the
-  exact analogue of what we are doing here for `lm_head`.
-- [`docs/synthesis/03-software-architecture.md`](03-software-architecture.md) —
+Primary set — referenced by the original plan:
+
+- [`docs/01-high-level-explainer.md`](../01-high-level-explainer.md) — LARQL conceptual overview.
+- [`docs/02-mathematical-foundations.md`](../02-mathematical-foundations.md)
+  — sections 2–4 ground the math.
+- [`docs/03-software-architecture.md`](../03-software-architecture.md) —
   how LARQL organises gate-KNN dispatch.
-- [`docs/synthesis/05-questions.md`](05-questions.md) — Q1 §"Where the cost
-  saving actually appears" is directly relevant.
+- [`docs/05-qa-and-toy-implementation.md`](../05-qa-and-toy-implementation.md) —
+  the "where the cost saving appears" discussion in Q1 is directly relevant.
+- [`docs/06-mlx-lm-head-acceleration-plan.md`](../06-mlx-lm-head-acceleration-plan.md) —
+  the original plan this document revises.
 - [`docs/walk-boundary-sweep.md`](../walk-boundary-sweep.md) — empirical
   proof that approximate-then-verify preserves output (Gemma 3-4B,
   zero divergence at all 34 layer boundaries).
 - [`docs/ffn-graph-layer.md`](../ffn-graph-layer.md) — engineering
   details of LARQL's analogous primitive.
+
+Synthesis equivalents (alternative angle, this directory):
+
+- [`01-explainer.md`](01-explainer.md), [`02-mathematical-foundation.md`](02-mathematical-foundation.md),
+  [`03-software-architecture.md`](03-software-architecture.md),
+  [`05-questions.md`](05-questions.md), [`06-mlx-plan-review.md`](06-mlx-plan-review.md).
 
 ### 7.2 External references
 
@@ -687,8 +764,10 @@ within the documented ranges; the algorithm choice is yours within
 ## 9. Communication and coordination
 
 - **The user (project owner):** has approved this plan. Provides
-  hardware access (M3 Ultra Mac Studio for 122B benchmarks) and HF
-  credentials.
+  hardware access (512 GB M3 Ultra Mac Studio — fits the 397B primary
+  target at Q4_K_M with comfortable headroom) and HF credentials.
+  The 397B variant is one of the user's daily-driver local models;
+  they have direct skin in the speedup outcome.
 - **MLX-LM maintainers:** **a discussion issue is required** before
   the PR (Phase 1, step 5). The change touches a new module, a public
   helper, sampler-relevant output format, and (for tied embeddings) a
@@ -696,9 +775,10 @@ within the documented ranges; the algorithm choice is yours within
 - **You (the agent):** end-of-phase status updates to the user.
   Surface immediately on:
   - Tied-embedding path doesn't work on Qwen 3.5-9B.
-  - PCA build cost > 60 s on 122B (decide RP fallback or larger
-    constraint).
-  - MTP interaction degrades accept rate by > 10%.
+  - PCA build cost > 60 s on 122B or > 90 s on 397B (decide RP
+    fallback or different `target_dim`).
+  - MTP interaction degrades accept rate by > 10% (on either 122B or 397B).
+  - 122B speedup < 5% (don't burn 397B hardware time before reassessing).
   - Any of the §6 quality criteria fail after tuning.
 - **LARQL repository owner:** Chris Hayuk. The user coordinates
   cross-references back to this repo.
@@ -715,17 +795,16 @@ In priority order, after the v1 PR lands:
 2. **Fully sparse output mode.** Return `(cand, exact_scores)` and patch
    samplers to consume sparse logits directly. Eliminates the
    per-token full-V buffer write.
-3. **Apply to Qwen 3.5-397B-A17B** (deferred from v1 sprint).
-4. **Apply to gate-KNN per-layer FFN selection.** LARQL-style at the
+3. **Apply to gate-KNN per-layer FFN selection.** LARQL-style at the
    FFN level, larger total wins on top of the lm_head speedup.
-5. **Sidecar mode for production deployment.** Once the technique is
+4. **Sidecar mode for production deployment.** Once the technique is
    proven in production, allow saving the projection to disk for
    instant load.
-6. **MTP head extension.** Apply ApproxLMHead to Qwen 3.5's MTP head
+5. **MTP head extension.** Apply ApproxLMHead to Qwen 3.5's MTP head
    itself.
-7. **Validate on Kimi K2 / GLM-4.5 / DeepSeek V3.** Same algorithm,
+6. **Validate on Kimi K2 / GLM-4.5 / DeepSeek V3.** Same algorithm,
    different model families. Expect similar speedups.
-8. **Port to llama.cpp.** Larger user base, harder PR. Effectively a
+7. **Port to llama.cpp.** Larger user base, harder PR. Effectively a
    fresh implementation, not a port — set expectations accordingly.
 
 None of the above is in scope for v1. Ship the simple version cleanly.
@@ -737,11 +816,13 @@ None of the above is in scope for v1. Ship the simple version cleanly.
 > Replace Qwen 3.5's `lm_head` projection in `mlx-lm` with a two-stage
 > approximate-then-exact search: a PCA-based 64-dim prefilter (random
 > projection as fallback) over `[V × H]` followed by exact dot products
-> on the top-2,048 candidates. Built at load time in 10–30 s, no
-> sidecar files. Mathematically grounded in randomised SVD and JL;
-> engineering-grounded in LARQL's gate-KNN pattern. Realistic target:
-> ~5% total decode speedup on Qwen 3.5-122B-A10B (8% stretch),
-> negligible quality loss, no surprises with tied embeddings or MTP.
+> on the top-2,048 candidates. Built at load time in 10–90 s depending
+> on model size, no sidecar files. Mathematically grounded in
+> randomised SVD and JL; engineering-grounded in LARQL's gate-KNN
+> pattern. Realistic target: ~5% total decode speedup on
+> **Qwen 3.5-397B-A17B** (the primary perf target on a 512 GB M3 Ultra
+> Mac Studio), 8% stretch, negligible quality loss, validated on the
+> 9B and 122B variants on the way up.
 
 The math is sound, the engineering is bounded, the quality safeguards
 are in place. Ship cleanly.

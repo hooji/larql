@@ -40,3 +40,14 @@ with the originals (`docs/format.md`, `docs/training-free-insert.md`,
   **02** then **03**.
 - For a port to another language or environment: read **02**, then
   the relevant section of **05**.
+- For the MLX `lm_head` sprint: read **06** (review), then **07**
+  (the revised plan to actually execute).
+
+## Relationship to `docs/0X-*.md`
+
+A parallel set of documents at the top of `docs/` covers the same
+ground (`docs/01-high-level-explainer.md`,
+`docs/02-mathematical-foundations.md`, etc.). The synthesis
+documents in this directory are an alternative-angle treatment
+written in a separate session. Both are kept; either is a valid
+entry point.
